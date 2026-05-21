@@ -54,24 +54,21 @@ func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time, sour
 		env = append(env, fmt.Sprintf("TIMECTL_MANUAL_TIME=%s", manualTime.Format(time.RFC3339)))
 	}
 
-	       // Split command for exec.Command
-	       parts := strings.Fields(m.applyCommand)
-	       if len(parts) == 0 {
-		       return fmt.Errorf("invalid NTP apply command")
-	       }
-	       cmd := exec.Command(parts[0], parts[1:]...)
-	       // Inherit current environment and append our variables
-	       cmd.Env = append(cmd.Env, append(env, getCurrentEnv()...)...)
+		       // Split command for exec.Command
+		       parts := strings.Fields(m.applyCommand)
+		       if len(parts) == 0 {
+			       return fmt.Errorf("invalid NTP apply command")
+		       }
+		       cmd := exec.Command(parts[0], parts[1:]...)
+		       // Inherit current environment and append our variables
+		       cmd.Env = append(os.Environ(), env...)
 
-	       output, err := cmd.CombinedOutput()
-	       if err != nil {
-		       return fmt.Errorf("failed to run NTP apply command: %w\noutput: %s", err, string(output))
-	       }
-	       return nil
-// getCurrentEnv returns the current process environment variables
-func getCurrentEnv() []string {
-	return append([]string{}, exec.Command("env").Env...)
-}
+		       output, err := cmd.CombinedOutput()
+		       if err != nil {
+			       return fmt.Errorf("failed to run NTP apply command: %w\noutput: %s", err, string(output))
+		       }
+		       return nil
+
 }
 
 // Stop is now a no-op (legacy)
