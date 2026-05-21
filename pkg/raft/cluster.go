@@ -184,12 +184,13 @@ func (c *Cluster) SetTimeMode(mode config.TimeMode, operatorID string, manualTim
 
 // SetTimeModeWithOrder sets the time mode through Raft consensus with an explicit order/epoch.
 func (c *Cluster) SetTimeModeWithOrder(mode config.TimeMode, operatorID string, manualTime *time.Time, orderID uint64) error {
-	state := config.TimeModeState{
-		Mode:       mode,
-		OperatorID: operatorID,
-		ManualTime: manualTime,
-		OrderID:    orderID,
-	}
+   state := config.TimeModeState{
+	   Mode:           mode,
+	   OperatorID:     operatorID,
+	   ManualTime:     manualTime,
+	   OrderID:        orderID,
+	   OrderCreatedAt: time.Now(),
+   }
 
 	stateJSON, err := json.Marshal(state)
 	if err != nil {

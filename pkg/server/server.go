@@ -230,6 +230,12 @@ func (s *Server) applyTimeMode(mode config.TimeMode) error {
 	var manualTime *time.Time
 	if state.ManualTime != nil {
 		manualTime = state.ManualTime
+		// If MANUAL mode, apply delta between order creation and now
+		if mode == config.ModeManual && !state.OrderCreatedAt.IsZero() {
+			delta := time.Now().Sub(state.OrderCreatedAt)
+			t := manualTime.Add(delta)
+			manualTime = &t
+		}
 	}
 	if err := s.ntpManager.Apply(mode.String(), state.OrderID, manualTime); err != nil {
 		return fmt.Errorf("failed to run NTP apply command: %w", err)

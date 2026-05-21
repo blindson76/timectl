@@ -66,12 +66,13 @@ type ClusterMember struct {
 
 // TimeModeState represents current time mode state
 type TimeModeState struct {
-	Mode          TimeMode
-	LastUpdated   time.Time
-	OperatorID    string      // Who set this mode
-	ManualTime    *time.Time  // Only set when Mode is ModeManual
-	LastSyncTime  time.Time
-	OrderID       uint64      // Order or epoch number for ordering
+	Mode            TimeMode
+	LastUpdated     time.Time
+	OperatorID      string      // Who set this mode
+	ManualTime      *time.Time  // Only set when Mode is ModeManual
+	LastSyncTime    time.Time
+	OrderID         uint64      // Order or epoch number for ordering
+	OrderCreatedAt  time.Time   // When the order was created (for MANUAL mode delta)
 }
 
 // ServerState represents the state of a server in the cluster
