@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package timectl;
+
+option go_package = "timectl/pkg/pb";
+
+message TimeMode {
+    enum Mode {
+        MODE_UNSPECIFIED = 0;
+        MODE_AUTO = 1;
+        MODE_MANUAL = 2;
+    }
+    
+    Mode mode = 1;
+    string timestamp = 2;  // RFC3339 timestamp
+    string operator_id = 3;
+    string manual_time = 4;  // RFC3339 timestamp if mode is MANUAL
+}
+
+message GetTimeModeRequest {
+    string node_id = 1;
+}
+
+message GetTimeModeResponse {
+    TimeMode time_mode = 1;
+}
+
+message SetTimeModeRequest {
+    TimeMode time_mode = 1;
+}
+
+message SetTimeModeResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message SyncStateRequest {
+    string node_id = 1;
+}
+
+message SyncStateResponse {
+    TimeMode current_mode = 1;
+    repeated ServerState servers = 2;
+}
+
+message ServerState {
+    string node_id = 1;
+    TimeMode last_mode = 2;
+    bool is_alive = 3;
+}
+
+service TimeCtl {
+    rpc GetTimeMode(GetTimeModeRequest) returns (GetTimeModeResponse);
+    rpc SetTimeMode(SetTimeModeRequest) returns (SetTimeModeResponse);
+    rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
+}
