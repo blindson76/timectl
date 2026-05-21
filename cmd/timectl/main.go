@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,15 @@ func main() {
 	cfg.DataDir = *dataDir
 	cfg.NTPEnabled = *enableNTP
 	cfg.MinimumBootstrapNodes = *minBootstrapNodes
+
+	if delaySecStr := bootstrapDelayEnv(); delaySecStr != "" {
+		delaySec, err := strconv.Atoi(delaySecStr)
+		if err != nil || delaySec < 0 {
+			fmt.Printf("Error: invalid BOOTSTRAP_DELAY/BOOTSTRA_DELAY value %q (must be non-negative integer seconds)\n", delaySecStr)
+			os.Exit(1)
+		}
+		cfg.BootstrapDelay = time.Duration(delaySec) * time.Second
+	}
 
 	if *clusterMembers != "" {
 		members, err := parseClusterMembers(*clusterMembers)
@@ -83,6 +93,7 @@ func main() {
 		fmt.Printf("  Data Directory: %s\n", cfg.DataDir)
 		fmt.Printf("  Cluster Members: %d\n", len(cfg.ClusterMembers))
 		fmt.Printf("  Minimum Bootstrap Nodes: %d\n", cfg.MinimumBootstrapNodes)
+		fmt.Printf("  Bootstrap Delay: %s\n", cfg.BootstrapDelay)
 		fmt.Printf("  Join Addresses: %v\n", cfg.JoinAddr)
 		fmt.Printf("  NTP Servers: %v\n", cfg.NTPServers)
 		fmt.Printf("  NTP Enabled: %v\n", cfg.NTPEnabled)
@@ -225,4 +236,11 @@ func raftAddrFromRoster(nodeID string, members []config.ClusterMember) (string, 
 		}
 	}
 	return "", false
+}
+
+func bootstrapDelayEnv() string {
+	if v := strings.TrimSpace(os.Getenv("BOOTSTRAP_DELAY")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("BOOTSTRA_DELAY"))
 }

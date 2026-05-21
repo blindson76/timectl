@@ -104,7 +104,7 @@ func NewCluster(cfg *config.ServerConfig) (*Cluster, error) {
 
 			// Exactly one deterministic node performs bootstrap to avoid split bootstrap.
 			if isBootstrapCoordinator(cfg.NodeID, cfg.ClusterMembers) {
-				if err := waitForReachableMembers(cfg.ClusterMembers, cfg.MinimumBootstrapNodes, 2*time.Minute); err != nil {
+				if err := waitForReachableMembers(cfg.ClusterMembers, cfg.MinimumBootstrapNodes, cfg.BootstrapDelay, 2*time.Minute); err != nil {
 					return nil, err
 				}
 
@@ -351,10 +351,11 @@ func isBootstrapCoordinator(nodeID string, members []config.ClusterMember) bool 
 	return len(ids) > 0 && ids[0] == nodeID
 }
 
-func waitForReachableMembers(members []config.ClusterMember, minReachable int, timeout time.Duration) error {
+func waitForReachableMembers(members []config.ClusterMember, minReachable int, bootstrapDelay, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	var minReachedAt time.Time
 
 	for {
 		reachable := 0
@@ -366,8 +367,21 @@ func waitForReachableMembers(members []config.ClusterMember, minReachable int, t
 			}
 		}
 
-		if reachable >= minReachable {
+		if reachable > minReachable {
 			return nil
+		}
+
+		if reachable == minReachable {
+			if bootstrapDelay <= 0 {
+				return nil
+			}
+			if minReachedAt.IsZero() {
+				minReachedAt = time.Now()
+			} else if time.Since(minReachedAt) >= bootstrapDelay {
+				return nil
+			}
+		} else {
+			minReachedAt = time.Time{}
 		}
 
 		if time.Now().After(deadline) {

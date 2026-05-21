@@ -32,6 +32,7 @@ type ServerConfig struct {
 	DataDir          string        // Directory for data storage
 	ClusterMembers   []ClusterMember // Full cluster roster; same on every node
 	MinimumBootstrapNodes int      // Minimum reachable nodes before bootstrap
+	BootstrapDelay   time.Duration // Wait time before bootstrap when exactly minimum nodes are reachable
 	JoinAddr         []string      // Addresses of existing cluster members to join (empty = start new cluster)
 	ElectionTimeout  time.Duration // Raft election timeout
 	HeartbeatTimeout time.Duration // Raft heartbeat timeout
@@ -49,6 +50,7 @@ func DefaultConfig() *ServerConfig {
 		SnapshotInterval: 128 * 1024 * 1024,
 		SnapshotRetain:   2,
 		MinimumBootstrapNodes: 3,
+		BootstrapDelay:   0,
 		NTPEnabled:       true,
 		NTPServers:       []string{"0.pool.ntp.org", "1.pool.ntp.org"},
 	}
