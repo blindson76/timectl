@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+type commandSpec struct {
+	name string
+	args []string
+}
+
 // Manager manages NTP service
 type Manager struct {
 	mu         sync.RWMutex
@@ -32,27 +37,35 @@ func (m *Manager) Start() error {
 	defer m.mu.Unlock()
 
 	if m.isRunning {
-		return fmt.Errorf("NTP service is already running")
+		return nil
 	}
 
-	var cmd *exec.Cmd
+	var commands []commandSpec
 
 	switch m.systemOS {
 	case "windows":
-		// Start Windows NTP service
-		cmd = exec.Command("net", "start", "W32Time")
+		// Prefer Meinberg NTP service names on Windows.
+		commands = []commandSpec{
+			{name: "net", args: []string{"start", "NTP"}},
+			{name: "net", args: []string{"start", "ntpd"}},
+			{name: "sc", args: []string{"start", "NTP"}},
+			{name: "sc", args: []string{"start", "ntpd"}},
+		}
 	case "linux":
-		// Try systemd first
-		cmd = exec.Command("systemctl", "start", "ntp")
+		commands = []commandSpec{
+			{name: "systemctl", args: []string{"start", "ntpd"}},
+			{name: "systemctl", args: []string{"start", "ntp"}},
+			{name: "service", args: []string{"ntpd", "start"}},
+			{name: "service", args: []string{"ntp", "start"}},
+		}
 	case "darwin":
-		// macOS
-		cmd = exec.Command("sudo", "launchctl", "start", "org.ntp.ntpd")
+		commands = []commandSpec{{name: "sudo", args: []string{"launchctl", "start", "org.ntp.ntpd"}}}
 	default:
 		return fmt.Errorf("unsupported OS: %s", m.systemOS)
 	}
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to start NTP service: %w\noutput: %s", err, string(output))
+	if err := runFirstSuccessful(commands); err != nil {
+		return fmt.Errorf("failed to start NTP service: %w", err)
 	}
 
 	m.isRunning = true
@@ -65,24 +78,34 @@ func (m *Manager) Stop() error {
 	defer m.mu.Unlock()
 
 	if !m.isRunning {
-		return fmt.Errorf("NTP service is not running")
+		return nil
 	}
 
-	var cmd *exec.Cmd
+	var commands []commandSpec
 
 	switch m.systemOS {
 	case "windows":
-		cmd = exec.Command("net", "stop", "W32Time")
+		commands = []commandSpec{
+			{name: "net", args: []string{"stop", "NTP"}},
+			{name: "net", args: []string{"stop", "ntpd"}},
+			{name: "sc", args: []string{"stop", "NTP"}},
+			{name: "sc", args: []string{"stop", "ntpd"}},
+		}
 	case "linux":
-		cmd = exec.Command("systemctl", "stop", "ntp")
+		commands = []commandSpec{
+			{name: "systemctl", args: []string{"stop", "ntpd"}},
+			{name: "systemctl", args: []string{"stop", "ntp"}},
+			{name: "service", args: []string{"ntpd", "stop"}},
+			{name: "service", args: []string{"ntp", "stop"}},
+		}
 	case "darwin":
-		cmd = exec.Command("sudo", "launchctl", "stop", "org.ntp.ntpd")
+		commands = []commandSpec{{name: "sudo", args: []string{"launchctl", "stop", "org.ntp.ntpd"}}}
 	default:
 		return fmt.Errorf("unsupported OS: %s", m.systemOS)
 	}
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to stop NTP service: %w\noutput: %s", err, string(output))
+	if err := runFirstSuccessful(commands); err != nil {
+		return fmt.Errorf("failed to stop NTP service: %w", err)
 	}
 
 	m.isRunning = false
@@ -104,24 +127,14 @@ func (m *Manager) applyNTPConfiguration() error {
 
 	switch m.systemOS {
 	case "windows":
-		// Windows: Use W32Time command
-		for _, server := range m.ntpServers {
-			// Configure time source
-			configCmd := exec.Command(
-				"w32tm",
-				"/config",
-				"/manualpeerlist:"+server,
-				"/syncfromflags:MANUAL",
-				"/update",
-			)
-			if output, err := configCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("failed to configure W32Time: %w\noutput: %s", err, string(output))
-			}
+		// Meinberg NTP: restart ntpd service to reload existing ntp.conf.
+		if err := runFirstSuccessful([]commandSpec{{name: "net", args: []string{"stop", "NTP"}}, {name: "net", args: []string{"stop", "ntpd"}}, {name: "sc", args: []string{"stop", "NTP"}}, {name: "sc", args: []string{"stop", "ntpd"}}}); err != nil {
+			// Ignore stop failures when service was not running.
 		}
-		// Restart W32Time service
-		cmd = exec.Command("net", "stop", "W32Time")
-		cmd.CombinedOutput()
-		cmd = exec.Command("net", "start", "W32Time")
+		if err := runFirstSuccessful([]commandSpec{{name: "net", args: []string{"start", "NTP"}}, {name: "net", args: []string{"start", "ntpd"}}, {name: "sc", args: []string{"start", "NTP"}}, {name: "sc", args: []string{"start", "ntpd"}}}); err != nil {
+			return fmt.Errorf("failed to reload Meinberg NTP service: %w", err)
+		}
+        cmd = nil
 
 	case "linux":
 		// Linux: Configure ntpd or chrony
@@ -160,8 +173,11 @@ func (m *Manager) SyncTime() error {
 
 	switch m.systemOS {
 	case "windows":
-		// Windows: Use w32tm /resync
-		cmd = exec.Command("w32tm", "/resync", "/force")
+		if len(servers) > 0 {
+			cmd = exec.Command("ntpdate", "-u", servers[0])
+		} else {
+			cmd = exec.Command("ntpd", "-gq")
+		}
 
 	case "linux":
 		// Linux: Use ntpdate or timedatectl
@@ -236,7 +252,17 @@ func (m *Manager) CheckNTPStatus() (bool, error) {
 
 	switch m.systemOS {
 	case "windows":
-		cmd = exec.Command("net", "start")
+		for _, c := range []commandSpec{{name: "sc", args: []string{"query", "NTP"}}, {name: "sc", args: []string{"query", "ntpd"}}} {
+			out, err := exec.Command(c.name, c.args...).CombinedOutput()
+			if err != nil {
+				continue
+			}
+			outputStr := strings.ToUpper(string(out))
+			if strings.Contains(outputStr, "RUNNING") {
+				return true, nil
+			}
+		}
+		return false, nil
 
 	case "linux":
 		cmd = exec.Command("systemctl", "is-active", "ntp")
@@ -259,6 +285,21 @@ func (m *Manager) CheckNTPStatus() (bool, error) {
 	}
 
 	return true, nil
+}
+
+func runFirstSuccessful(commands []commandSpec) error {
+	var lastErr error
+	for _, c := range commands {
+		output, err := exec.Command(c.name, c.args...).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("%s %s: %w (output: %s)", c.name, strings.Join(c.args, " "), err, strings.TrimSpace(string(output)))
+	}
+	if lastErr == nil {
+		return fmt.Errorf("no command candidates provided")
+	}
+	return lastErr
 }
 
 // IsRunning returns whether NTP service is running

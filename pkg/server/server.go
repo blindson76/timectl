@@ -24,6 +24,10 @@ type Server struct {
 	closed       bool
 	heartbeatTTL time.Duration
 	lastExternalTimeAvailable bool
+	hasAppliedDecision bool
+	lastAppliedOrderID uint64
+	lastAppliedMode config.TimeMode
+	lastAppliedManualTime *time.Time
 }
 
 type persistedStatus struct {
@@ -153,14 +157,18 @@ func (s *Server) reconciliationLoop() {
 		}
 		s.mu.RUnlock()
 
-		// Get current consensus time mode
-		mode := s.raftCluster.GetCurrentMode()
+		state := s.raftCluster.GetTimeModeState()
+		if !s.shouldApplyDecision(state) {
+			continue
+		}
 
 		// Apply mode based on consensus
-		if err := s.applyTimeMode(mode); err != nil {
+		if err := s.applyTimeMode(state.Mode); err != nil {
 			fmt.Printf("Error applying time mode: %v\n", err)
 			continue
 		}
+
+		s.markDecisionApplied(state)
 
 		if err := s.persistCurrentStatus(); err != nil {
 			fmt.Printf("Error persisting current status: %v\n", err)
@@ -168,8 +176,60 @@ func (s *Server) reconciliationLoop() {
 	}
 }
 
+func (s *Server) shouldApplyDecision(state config.TimeModeState) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.hasAppliedDecision {
+		return true
+	}
+
+	if state.OrderID != s.lastAppliedOrderID {
+		return true
+	}
+
+	if state.Mode != s.lastAppliedMode {
+		return true
+	}
+
+	if !sameTimePtr(state.ManualTime, s.lastAppliedManualTime) {
+		return true
+	}
+
+	return false
+}
+
+func (s *Server) markDecisionApplied(state config.TimeModeState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.hasAppliedDecision = true
+	s.lastAppliedOrderID = state.OrderID
+	s.lastAppliedMode = state.Mode
+	if state.ManualTime != nil {
+		t := *state.ManualTime
+		s.lastAppliedManualTime = &t
+	} else {
+		s.lastAppliedManualTime = nil
+	}
+}
+
+func sameTimePtr(a, b *time.Time) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Equal(*b)
+}
+
 // applyTimeMode applies the consensus time mode to the system
 func (s *Server) applyTimeMode(mode config.TimeMode) error {
+	if err := s.ntpManager.Start(); err != nil {
+		return fmt.Errorf("failed to start ntpd service: %w", err)
+	}
+
 	switch mode {
 	case config.ModeAuto:
 		externalAvailable := s.detectExternalTimeAvailable()

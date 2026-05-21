@@ -10,6 +10,7 @@ A distributed, consensus-based time control system for managing NTP synchronizat
   - **MANUAL**: Operator provides manual time input via API
 - **Minimum Quorum**: Cluster requires at least 3 nodes to operate and reach consensus
 - **NTP Management**: Automatic management of NTP service on Windows, Linux, and macOS
+- **Meinberg NTP Support**: Uses `ntpd`/`NTP` service controls (with fallbacks) instead of `W32Time` on Windows
 - **gRPC Interface**: Type-safe RPC interface for inter-node communication
 - **HTTP API**: REST API for status, configuration, and management
 - **Leader Election**: Automatic leader election and failover handling
@@ -267,6 +268,13 @@ service TimeCtl {
 
 ## Operating Modes
 
+## NTP Service Behavior
+
+- timectl starts the local `ntpd` service before applying a consensus-decided time mode.
+- On Windows, service control prefers Meinberg-style names (`NTP`, `ntpd`) via `net`/`sc` fallbacks.
+- On Linux, service control prefers `ntpd` and falls back to `ntp` (`systemctl`/`service`).
+- During AUTO and MANUAL reconciliation, timectl keeps NTP sync enabled after mode-specific configuration is applied.
+
 ### AUTO Mode (Default)
 
 - System synchronizes time from configured external NTP sources
@@ -286,7 +294,7 @@ service TimeCtl {
 1. **State Collection**: Each node periodically reports its current time mode
 2. **Voting**: When a node proposes a mode change, all nodes vote
 3. **Decision**: Majority vote determines the new cluster-wide time mode
-4. **Application**: Once consensus is reached, all nodes apply the mode
+4. **Application**: Once consensus is reached, all nodes start `ntpd` and then apply the mode
 5. **Verification**: Periodic health checks ensure consistency
 
 ## Cluster Operations
