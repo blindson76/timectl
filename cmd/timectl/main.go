@@ -16,6 +16,7 @@ import (
 	"timectl/pkg/server"
 )
 
+
 func main() {
 	hostname, _ := os.Hostname()
 
@@ -29,6 +30,7 @@ func main() {
 	minBootstrapNodes := flag.Int("min-bootstrap-nodes", 3, "Minimum reachable nodes required before bootstrap")
 	joinAddrs := flag.String("join", "", "Comma-separated addresses to join (e.g., 'localhost:5000,localhost:5001')")
 	ntpServers := flag.String("ntp-servers", "0.pool.ntp.org,1.pool.ntp.org", "Comma-separated NTP servers")
+	ntpApplyCmd := flag.String("ntp-apply-cmd", os.Getenv("TIMECTL_NTP_APPLY_CMD"), "Command to run when applying a new time mode (overrides ntpd service)")
 	enableNTP := flag.Bool("ntp", true, "Enable NTP management")
 	verbose := flag.Bool("v", false, "Verbose logging")
 	flag.Parse()
@@ -80,8 +82,14 @@ func main() {
 		cfg.JoinAddr = strings.Split(*joinAddrs, ",")
 	}
 
+
 	if *ntpServers != "" {
 		cfg.NTPServers = strings.Split(*ntpServers, ",")
+	}
+	if *ntpApplyCmd != "" {
+		cfg.NTPApplyCommand = *ntpApplyCmd
+	} else if v := os.Getenv("TIMECTL_NTP_APPLY_CMD"); v != "" {
+		cfg.NTPApplyCommand = v
 	}
 
 	if *verbose {
@@ -100,7 +108,7 @@ func main() {
 	}
 
 	// Create NTP manager
-	ntpManager := ntp.NewManager(cfg.NTPServers)
+	ntpManager := ntp.NewManager(cfg.NTPServers, cfg.NTPApplyCommand)
 
 	if *verbose {
 		fmt.Println("[INFO] Creating Raft cluster...")

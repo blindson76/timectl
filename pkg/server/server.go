@@ -226,47 +226,15 @@ func sameTimePtr(a, b *time.Time) bool {
 
 // applyTimeMode applies the consensus time mode to the system
 func (s *Server) applyTimeMode(mode config.TimeMode) error {
-	if err := s.ntpManager.Start(); err != nil {
-		return fmt.Errorf("failed to start ntpd service: %w", err)
+	state := s.raftCluster.GetTimeModeState()
+	var manualTime *time.Time
+	if state.ManualTime != nil {
+		manualTime = state.ManualTime
 	}
-
-	switch mode {
-	case config.ModeAuto:
-		externalAvailable := s.detectExternalTimeAvailable()
-		s.lastExternalTimeAvailable = externalAvailable
-
-		if !externalAvailable {
-			fmt.Printf("[WARN] External time source unavailable; cluster should switch to MANUAL if needed\n")
-			return nil
-		}
-
-		if s.raftCluster.IsLeader() {
-			if err := s.ntpManager.SetNTPServers(s.cfg.NTPServers); err != nil {
-				return err
-			}
-		} else {
-			// Orphan mode uses local clock as source for non-leader nodes.
-			if err := s.ntpManager.SetNTPServers([]string{"127.127.1.0"}); err != nil {
-				return err
-			}
-		}
-		return s.ntpManager.EnableNTPSync()
-
-	case config.ModeManual:
-		state := s.raftCluster.GetTimeModeState()
-		if state.ManualTime != nil {
-			if err := s.ntpManager.SetSystemTime(*state.ManualTime); err != nil {
-				return err
-			}
-		}
-		if err := s.ntpManager.SetNTPServers([]string{"127.127.1.0"}); err != nil {
-			return err
-		}
-		return s.ntpManager.EnableNTPSync()
-
-	default:
-		return fmt.Errorf("unknown time mode: %v", mode)
+	if err := s.ntpManager.Apply(mode.String(), state.OrderID, manualTime); err != nil {
+		return fmt.Errorf("failed to run NTP apply command: %w", err)
 	}
+	return nil
 }
 
 // handleStatus handles GET /api/status

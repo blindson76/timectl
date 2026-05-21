@@ -40,6 +40,7 @@ type ServerConfig struct {
 	SnapshotRetain   int           // Number of snapshots to retain
 	NTPEnabled       bool          // Whether to enable NTP management
 	NTPServers       []string      // External NTP servers
+	NTPApplyCommand  string        // Command to run when applying a new time mode (instead of ntpd service)
 }
 
 // DefaultConfig returns default configuration
@@ -53,6 +54,7 @@ func DefaultConfig() *ServerConfig {
 		BootstrapDelay:   0,
 		NTPEnabled:       true,
 		NTPServers:       []string{"0.pool.ntp.org", "1.pool.ntp.org"},
+		NTPApplyCommand:  "",
 	}
 }
 

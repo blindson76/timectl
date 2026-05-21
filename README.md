@@ -9,8 +9,7 @@ A distributed, consensus-based time control system for managing NTP synchronizat
   - **AUTO**: System synchronizes time from external NTP sources automatically
   - **MANUAL**: Operator provides manual time input via API
 - **Minimum Quorum**: Cluster requires at least 3 nodes to operate and reach consensus
-- **NTP Management**: Automatic management of NTP service on Windows, Linux, and macOS
-- **Meinberg NTP Support**: Uses `ntpd`/`NTP` service controls (with fallbacks) instead of `W32Time` on Windows
+- **NTP Management**: Runs a user-specified command (not a service) on every new cluster time mode decision
 - **gRPC Interface**: Type-safe RPC interface for inter-node communication
 - **HTTP API**: REST API for status, configuration, and management
 - **Leader Election**: Automatic leader election and failover handling
@@ -70,6 +69,21 @@ Run the same command on every server:
 
 Requirement for zero per-node flags: hostnames must match node IDs in `--cluster-members` (`node1` ... `node6`).
 
+
+### NTP Apply Command
+
+You can specify a custom command to run every time a new cluster time mode decision is applied. This replaces all built-in NTP/ntpd service logic. The command is invoked with environment variables:
+
+- `TIMECTL_MODE` ("AUTO" or "MANUAL")
+- `TIMECTL_ORDER_ID` (the consensus order/epoch number)
+- `TIMECTL_MANUAL_TIME` (RFC3339, only if mode is MANUAL)
+
+Specify the command via:
+- `--ntp-apply-cmd '/path/to/script --flag'` (CLI flag)
+- or environment variable `TIMECTL_NTP_APPLY_CMD`
+
+If not set, no command is run.
+
 ### Configuration Options
 
 - `--cluster-members`: Shared roster for all nodes in format `nodeID=host:port,...`
@@ -81,6 +95,7 @@ Requirement for zero per-node flags: hostnames must match node IDs in `--cluster
 - `--min-bootstrap-nodes`: Minimum reachable nodes required before bootstrap (default: `3`)
 - `--ntp-servers`: Comma-separated NTP servers (default: 0.pool.ntp.org,1.pool.ntp.org)
 - `--ntp`: Enable NTP management (default: true)
+- `--ntp-apply-cmd`: Command to run when a new cluster time mode is applied (overrides all service logic)
 - `-v`: Enable verbose logging
 
 ## HTTP API
@@ -268,12 +283,13 @@ service TimeCtl {
 
 ## Operating Modes
 
-## NTP Service Behavior
 
-- timectl starts the local `ntpd` service before applying a consensus-decided time mode.
-- On Windows, service control prefers Meinberg-style names (`NTP`, `ntpd`) via `net`/`sc` fallbacks.
-- On Linux, service control prefers `ntpd` and falls back to `ntp` (`systemctl`/`service`).
-- During AUTO and MANUAL reconciliation, timectl keeps NTP sync enabled after mode-specific configuration is applied.
+## NTP Apply Command Behavior
+
+- When a new cluster time mode decision is applied, timectl runs the command specified by `--ntp-apply-cmd` (or `TIMECTL_NTP_APPLY_CMD`).
+- The command receives the current mode, order ID, and (if set) manual time as environment variables.
+- No NTP/ntpd service is started or stopped by timectl itself.
+- If no command is set, nothing is run.
 
 ### AUTO Mode (Default)
 

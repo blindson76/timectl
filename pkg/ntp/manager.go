@@ -15,100 +15,58 @@ type commandSpec struct {
 }
 
 // Manager manages NTP service
+
 type Manager struct {
-	mu         sync.RWMutex
-	isRunning  bool
-	ntpServers []string
-	systemOS   string // windows, linux, darwin
+    mu           sync.RWMutex
+    ntpServers   []string
+    applyCommand string
 }
 
 // NewManager creates a new NTP manager
-func NewManager(ntpServers []string) *Manager {
+func NewManager(ntpServers []string, applyCommand string) *Manager {
 	return &Manager{
-		ntpServers: ntpServers,
-		systemOS:   runtime.GOOS,
-		isRunning:  false,
+		ntpServers:   ntpServers,
+		applyCommand: applyCommand,
 	}
 }
 
-// Start starts the NTP service
-func (m *Manager) Start() error {
+// Apply runs the user-specified NTP apply command (if set)
+// This should be called when a new cluster decision is applied.
+func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.isRunning {
-		return nil
+	if m.applyCommand == "" {
+		return nil // No-op if not configured
 	}
 
-	var commands []commandSpec
-
-	switch m.systemOS {
-	case "windows":
-		// Prefer Meinberg NTP service names on Windows.
-		commands = []commandSpec{
-			{name: "net", args: []string{"start", "NTP"}},
-			{name: "net", args: []string{"start", "ntpd"}},
-			{name: "sc", args: []string{"start", "NTP"}},
-			{name: "sc", args: []string{"start", "ntpd"}},
-		}
-	case "linux":
-		commands = []commandSpec{
-			{name: "systemctl", args: []string{"start", "ntpd"}},
-			{name: "systemctl", args: []string{"start", "ntp"}},
-			{name: "service", args: []string{"ntpd", "start"}},
-			{name: "service", args: []string{"ntp", "start"}},
-		}
-	case "darwin":
-		commands = []commandSpec{{name: "sudo", args: []string{"launchctl", "start", "org.ntp.ntpd"}}}
-	default:
-		return fmt.Errorf("unsupported OS: %s", m.systemOS)
+	// Prepare environment variables for the command
+	env := []string{
+		fmt.Sprintf("TIMECTL_MODE=%s", mode),
+		fmt.Sprintf("TIMECTL_ORDER_ID=%d", orderID),
+	}
+	if manualTime != nil {
+		env = append(env, fmt.Sprintf("TIMECTL_MANUAL_TIME=%s", manualTime.Format(time.RFC3339)))
 	}
 
-	if err := runFirstSuccessful(commands); err != nil {
-		return fmt.Errorf("failed to start NTP service: %w", err)
+	// Split command for exec.Command
+	parts := strings.Fields(m.applyCommand)
+	if len(parts) == 0 {
+		return fmt.Errorf("invalid NTP apply command")
 	}
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Env = append(cmd.Env, env...)
 
-	m.isRunning = true
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to run NTP apply command: %w\noutput: %s", err, string(output))
+	}
 	return nil
 }
 
-// Stop stops the NTP service
+
+// Stop is now a no-op (legacy)
 func (m *Manager) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.isRunning {
-		return nil
-	}
-
-	var commands []commandSpec
-
-	switch m.systemOS {
-	case "windows":
-		commands = []commandSpec{
-			{name: "net", args: []string{"stop", "NTP"}},
-			{name: "net", args: []string{"stop", "ntpd"}},
-			{name: "sc", args: []string{"stop", "NTP"}},
-			{name: "sc", args: []string{"stop", "ntpd"}},
-		}
-	case "linux":
-		commands = []commandSpec{
-			{name: "systemctl", args: []string{"stop", "ntpd"}},
-			{name: "systemctl", args: []string{"stop", "ntp"}},
-			{name: "service", args: []string{"ntpd", "stop"}},
-			{name: "service", args: []string{"ntp", "stop"}},
-		}
-	case "darwin":
-		commands = []commandSpec{{name: "sudo", args: []string{"launchctl", "stop", "org.ntp.ntpd"}}}
-	default:
-		return fmt.Errorf("unsupported OS: %s", m.systemOS)
-	}
-
-	if err := runFirstSuccessful(commands); err != nil {
-		return fmt.Errorf("failed to stop NTP service: %w", err)
-	}
-
-	m.isRunning = false
 	return nil
 }
 
