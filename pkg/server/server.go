@@ -146,7 +146,7 @@ func (s *Server) heartbeatLoop() {
 
 // reconciliationLoop periodically reconciles system state
 func (s *Server) reconciliationLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -162,10 +162,16 @@ func (s *Server) reconciliationLoop() {
 			continue
 		}
 
-		// Apply mode based on consensus
-		if err := s.applyTimeMode(state.Mode); err != nil {
-			fmt.Printf("Error applying time mode: %v\n", err)
-			continue
+		// Defer applying mode changes until process restart.
+		// We only apply once in a process lifetime, when it has not applied any decision yet.
+		s.mu.RLock()
+		needsRuntimeApply := !s.hasAppliedDecision
+		s.mu.RUnlock()
+		if needsRuntimeApply {
+			if err := s.applyTimeMode(state.Mode); err != nil {
+				fmt.Printf("Error applying startup time mode: %v\n", err)
+				continue
+			}
 		}
 
 		s.markDecisionApplied(state)
@@ -358,7 +364,8 @@ func (s *Server) handleTimeMode(w http.ResponseWriter, r *http.Request) {
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "time mode updated",
+			"applied": false,
+			"message": "time mode stored; it will be applied after service restart",
 		})
 	}
 }

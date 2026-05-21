@@ -2,6 +2,7 @@ package ntp
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
