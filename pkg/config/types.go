@@ -69,6 +69,7 @@ type TimeModeState struct {
 	OperatorID    string      // Who set this mode
 	ManualTime    *time.Time  // Only set when Mode is ModeManual
 	LastSyncTime  time.Time
+	OrderID       uint64      // Order or epoch number for ordering
 }
 
 // ServerState represents the state of a server in the cluster
@@ -78,6 +79,9 @@ type ServerState struct {
 	LastUpdated   time.Time
 	IsAlive       bool
 	LastHeartbeat time.Time
+	LastOrderID   uint64      // Last applied order/epoch number
+	ManualTime    *time.Time  // Manual time associated with last order (if any)
+	ExternalTimeAvailable bool // Whether external time source was reachable on this node
 }
 
 // ConsensusLog represents a log entry for the consensus

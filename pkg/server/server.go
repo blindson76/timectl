@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"net/http"
 	"sync"
 	"time"
@@ -21,6 +23,15 @@ type Server struct {
 	mu           sync.RWMutex
 	closed       bool
 	heartbeatTTL time.Duration
+	lastExternalTimeAvailable bool
+}
+
+type persistedStatus struct {
+	Mode                  string     `json:"mode"`
+	ManualTime            *time.Time `json:"manual_time,omitempty"`
+	OrderID               uint64     `json:"order_id"`
+	LastUpdated           time.Time  `json:"last_updated"`
+	ExternalTimeAvailable bool       `json:"external_time_available"`
 }
 
 // NewServer creates a new timectl server
@@ -50,6 +61,14 @@ func (s *Server) Start() error {
 	// Wait for leader election with extended timeout for larger clusters
 	if err := s.raftCluster.WaitForLeader(60 * time.Second); err != nil {
 		fmt.Printf("[WARN] Timeout waiting for leader (cluster may not have quorum yet)\n")
+	}
+
+	if err := s.reportStartupStatus(); err != nil {
+		fmt.Printf("[WARN] Failed to report startup status: %v\n", err)
+	}
+
+	if err := s.startupClusterDecision(); err != nil {
+		fmt.Printf("[WARN] Startup cluster decision failed: %v\n", err)
 	}
 
 	// Start background tasks
@@ -99,12 +118,16 @@ func (s *Server) heartbeatLoop() {
 		s.mu.RUnlock()
 
 		// Collect current server state
+		current := s.raftCluster.GetTimeModeState()
 		state := config.ServerState{
-			NodeID:        s.cfg.NodeID,
-			LastMode:      s.raftCluster.GetCurrentMode(),
-			LastUpdated:   time.Now(),
-			IsAlive:       true,
-			LastHeartbeat: time.Now(),
+			NodeID:                s.cfg.NodeID,
+			LastMode:              current.Mode,
+			LastUpdated:           time.Now(),
+			IsAlive:               true,
+			LastHeartbeat:         time.Now(),
+			LastOrderID:           current.OrderID,
+			ManualTime:            current.ManualTime,
+			ExternalTimeAvailable: s.lastExternalTimeAvailable,
 		}
 
 		// Apply heartbeat to Raft
@@ -136,6 +159,11 @@ func (s *Server) reconciliationLoop() {
 		// Apply mode based on consensus
 		if err := s.applyTimeMode(mode); err != nil {
 			fmt.Printf("Error applying time mode: %v\n", err)
+			continue
+		}
+
+		if err := s.persistCurrentStatus(); err != nil {
+			fmt.Printf("Error persisting current status: %v\n", err)
 		}
 	}
 }
@@ -144,12 +172,37 @@ func (s *Server) reconciliationLoop() {
 func (s *Server) applyTimeMode(mode config.TimeMode) error {
 	switch mode {
 	case config.ModeAuto:
-		// Enable NTP synchronization
+		externalAvailable := s.detectExternalTimeAvailable()
+		s.lastExternalTimeAvailable = externalAvailable
+
+		if !externalAvailable {
+			fmt.Printf("[WARN] External time source unavailable; cluster should switch to MANUAL if needed\n")
+			return nil
+		}
+
+		if s.raftCluster.IsLeader() {
+			if err := s.ntpManager.SetNTPServers(s.cfg.NTPServers); err != nil {
+				return err
+			}
+		} else {
+			// Orphan mode uses local clock as source for non-leader nodes.
+			if err := s.ntpManager.SetNTPServers([]string{"127.127.1.0"}); err != nil {
+				return err
+			}
+		}
 		return s.ntpManager.EnableNTPSync()
 
 	case config.ModeManual:
-		// Disable NTP synchronization
-		return s.ntpManager.DisableNTPSync()
+		state := s.raftCluster.GetTimeModeState()
+		if state.ManualTime != nil {
+			if err := s.ntpManager.SetSystemTime(*state.ManualTime); err != nil {
+				return err
+			}
+		}
+		if err := s.ntpManager.SetNTPServers([]string{"127.127.1.0"}); err != nil {
+			return err
+		}
+		return s.ntpManager.EnableNTPSync()
 
 	default:
 		return fmt.Errorf("unknown time mode: %v", mode)
@@ -169,7 +222,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"leader":          s.raftCluster.GetLeader(),
 		"is_leader":       s.raftCluster.IsLeader(),
 		"current_mode":    state.Mode.String(),
+		"order_id":        state.OrderID,
 		"last_updated":    state.LastUpdated,
+		"manual_time":     state.ManualTime,
+		"external_time_available": s.lastExternalTimeAvailable,
 		"cluster_size":    s.raftCluster.GetClusterSize(),
 		"has_quorum":      s.raftCluster.IsMinimumQuorum(),
 		"raft_stats":      stats,
@@ -186,6 +242,7 @@ func (s *Server) handleTimeMode(w http.ResponseWriter, r *http.Request) {
 		state := s.raftCluster.GetTimeModeState()
 		response := map[string]interface{}{
 			"mode":         state.Mode.String(),
+			"order_id":     state.OrderID,
 			"last_updated": state.LastUpdated,
 			"operator_id":  state.OperatorID,
 		}
@@ -296,6 +353,9 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		servers = append(servers, map[string]interface{}{
 			"node_id":         state.NodeID,
 			"last_mode":       state.LastMode.String(),
+			"last_order_id":   state.LastOrderID,
+			"manual_time":     state.ManualTime,
+			"external_time_available": state.ExternalTimeAvailable,
 			"last_updated":    state.LastUpdated,
 			"is_alive":        state.IsAlive,
 			"last_heartbeat":  state.LastHeartbeat,
@@ -305,6 +365,123 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"servers": servers,
 	})
+}
+
+func (s *Server) startupClusterDecision() error {
+	if !s.raftCluster.IsLeader() {
+		return nil
+	}
+
+	// Give other members a brief window to report startup status.
+	time.Sleep(3 * time.Second)
+
+	states := s.raftCluster.GetServerStates()
+	if len(states) == 0 {
+		return nil
+	}
+
+	var chosen *config.ServerState
+	for _, st := range states {
+		candidate := st
+		if chosen == nil || candidate.LastOrderID > chosen.LastOrderID || (candidate.LastOrderID == chosen.LastOrderID && candidate.LastUpdated.After(chosen.LastUpdated)) {
+			chosen = &candidate
+		}
+	}
+
+	if chosen == nil {
+		return nil
+	}
+
+	operatorID := "startup-sync"
+	if err := s.raftCluster.SetTimeModeWithOrder(chosen.LastMode, operatorID, chosen.ManualTime, chosen.LastOrderID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) reportStartupStatus() error {
+	persisted, err := s.loadPersistedStatus()
+	if err != nil {
+		return err
+	}
+
+	mode := config.ModeAuto
+	if persisted.Mode == config.ModeManual.String() {
+		mode = config.ModeManual
+	}
+
+	state := config.ServerState{
+		NodeID:                s.cfg.NodeID,
+		LastMode:              mode,
+		LastUpdated:           persisted.LastUpdated,
+		IsAlive:               true,
+		LastHeartbeat:         time.Now(),
+		LastOrderID:           persisted.OrderID,
+		ManualTime:            persisted.ManualTime,
+		ExternalTimeAvailable: persisted.ExternalTimeAvailable,
+	}
+
+	return s.raftCluster.SyncServerStates([]config.ServerState{state})
+}
+
+func (s *Server) loadPersistedStatus() (*persistedStatus, error) {
+	path := filepath.Join(s.cfg.DataDir, "last-status.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &persistedStatus{
+				Mode:        config.ModeAuto.String(),
+				OrderID:     s.raftCluster.GetCurrentOrderID(),
+				LastUpdated: time.Now(),
+			}, nil
+		}
+		return nil, err
+	}
+
+	var ps persistedStatus
+	if err := json.Unmarshal(b, &ps); err != nil {
+		return nil, err
+	}
+	if ps.LastUpdated.IsZero() {
+		ps.LastUpdated = time.Now()
+	}
+	if ps.Mode == "" {
+		ps.Mode = config.ModeAuto.String()
+	}
+	return &ps, nil
+}
+
+func (s *Server) persistCurrentStatus() error {
+	state := s.raftCluster.GetTimeModeState()
+	ps := persistedStatus{
+		Mode:                  state.Mode.String(),
+		ManualTime:            state.ManualTime,
+		OrderID:               state.OrderID,
+		LastUpdated:           time.Now(),
+		ExternalTimeAvailable: s.lastExternalTimeAvailable,
+	}
+
+	b, err := json.MarshalIndent(ps, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(s.cfg.DataDir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(s.cfg.DataDir, "last-status.json")
+	return os.WriteFile(path, b, 0600)
+}
+
+func (s *Server) detectExternalTimeAvailable() bool {
+	if !s.cfg.NTPEnabled {
+		return false
+	}
+	if _, err := s.ntpManager.QueryNTPOffset(); err != nil {
+		return false
+	}
+	return true
 }
 
 // handleLogs handles GET /api/logs

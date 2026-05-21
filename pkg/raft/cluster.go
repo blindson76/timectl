@@ -16,6 +16,7 @@ import (
 )
 
 // Cluster manages the Raft cluster
+
 type Cluster struct {
 	cfg    *config.ServerConfig
 	raft   *raftlib.Raft
@@ -31,6 +32,11 @@ type Cluster struct {
 
 	// Log store and stable store
 	logStore raftlib.LogStore
+}
+
+// FSM returns the FSM instance
+func (c *Cluster) FSM() *FSM {
+	return c.fsm
 }
 
 // NewCluster creates a new Raft cluster
@@ -173,10 +179,16 @@ func (c *Cluster) ApplyCommand(cmd *ApplyCommand) error {
 
 // SetTimeMode sets the time mode through Raft consensus
 func (c *Cluster) SetTimeMode(mode config.TimeMode, operatorID string, manualTime *time.Time) error {
+	return c.SetTimeModeWithOrder(mode, operatorID, manualTime, c.GetCurrentOrderID()+1)
+}
+
+// SetTimeModeWithOrder sets the time mode through Raft consensus with an explicit order/epoch.
+func (c *Cluster) SetTimeModeWithOrder(mode config.TimeMode, operatorID string, manualTime *time.Time, orderID uint64) error {
 	state := config.TimeModeState{
 		Mode:       mode,
 		OperatorID: operatorID,
 		ManualTime: manualTime,
+		OrderID:    orderID,
 	}
 
 	stateJSON, err := json.Marshal(state)
@@ -190,6 +202,11 @@ func (c *Cluster) SetTimeMode(mode config.TimeMode, operatorID string, manualTim
 	}
 
 	return c.ApplyCommand(cmd)
+}
+
+// GetCurrentOrderID returns the currently applied order/epoch number.
+func (c *Cluster) GetCurrentOrderID() uint64 {
+	return c.fsm.GetLastOrderID()
 }
 
 // SyncServerStates synchronizes server states through Raft

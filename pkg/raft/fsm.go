@@ -1,4 +1,6 @@
+
 package raft
+
 
 import (
 	"encoding/json"
@@ -10,10 +12,21 @@ import (
 	"timectl/pkg/config"
 )
 
+// GetLastOrderID returns the last applied order/epoch number.
+func (f *FSM) GetLastOrderID() uint64 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.currentOrderID > 0 {
+		return f.currentOrderID
+	}
+	return f.lastLogIndex
+}
+
 // FSM implements raft.FSM interface for managing time mode state
 type FSM struct {
 	mu                sync.RWMutex
 	currentMode       config.TimeMode
+	currentOrderID    uint64
 	lastUpdated       time.Time
 	operatorID        string
 	manualTime        *time.Time
@@ -27,6 +40,7 @@ type FSM struct {
 func NewFSM() *FSM {
 	return &FSM{
 		currentMode:  config.ModeAuto, // Default to AUTO mode
+		currentOrderID: 0,
 		lastUpdated:  time.Now(),
 		serverStates: make(map[string]config.ServerState),
 		consensusLog: make([]config.ConsensusLog, 0),
@@ -69,6 +83,11 @@ func (f *FSM) applySetTimeMode(cmd *ApplyCommand, log *raftlib.Log) interface{} 
 	decidedMode := f.makeConsensusDecision(state)
 	
 	f.currentMode = decidedMode
+	if state.OrderID > 0 {
+		f.currentOrderID = state.OrderID
+	} else {
+		f.currentOrderID = log.Index
+	}
 	f.lastUpdated = time.Now()
 	f.operatorID = state.OperatorID
 	if state.ManualTime != nil {
@@ -120,35 +139,27 @@ func (f *FSM) applyHealthCheck(cmd *ApplyCommand, log *raftlib.Log) interface{} 
 	return "health check applied"
 }
 
-// makeConsensusDecision makes a consensus decision on time mode based on server states
+// makeConsensusDecision chooses the most recent order/epoch from all nodes and uses its mode
 func (f *FSM) makeConsensusDecision(newState *config.TimeModeState) config.TimeMode {
-	// Count votes for each mode
-	autoVotes := 0
-	manualVotes := 0
-
-	// Add the new state vote
-	if newState.Mode == config.ModeAuto {
-		autoVotes++
-	} else {
-		manualVotes++
-	}
-
-	// Count votes from known server states
-	for _, state := range f.serverStates {
-		if state.IsAlive {
-			if state.LastMode == config.ModeAuto {
-				autoVotes++
-			} else {
-				manualVotes++
-			}
-		}
-	}
-
-	// Majority wins
-	if autoVotes > manualVotes {
-		return config.ModeAuto
-	}
-	return config.ModeManual
+   // Collect all reported orders (including newState)
+   type orderInfo struct {
+	   Mode    config.TimeMode
+	   OrderID uint64
+   }
+   orders := []orderInfo{
+	   {Mode: newState.Mode, OrderID: newState.OrderID},
+   }
+   for _, state := range f.serverStates {
+	   orders = append(orders, orderInfo{Mode: state.LastMode, OrderID: state.LastOrderID})
+   }
+   // Find the order with the highest OrderID
+   var latest orderInfo
+   for i, o := range orders {
+	   if i == 0 || o.OrderID > latest.OrderID {
+		   latest = o
+	   }
+   }
+   return latest.Mode
 }
 
 // Snapshot creates a snapshot of current FSM state
@@ -217,6 +228,7 @@ func (f *FSM) GetTimeModeState() config.TimeModeState {
 
 	return config.TimeModeState{
 		Mode:         f.currentMode,
+		OrderID:      f.currentOrderID,
 		LastUpdated:  f.lastUpdated,
 		OperatorID:   f.operatorID,
 		ManualTime:   f.manualTime,
