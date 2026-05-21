@@ -77,6 +77,8 @@ You can specify a custom command to run every time a new cluster time mode decis
 - `TIMECTL_MODE` ("AUTO" or "MANUAL")
 - `TIMECTL_ORDER_ID` (the consensus order/epoch number)
 - `TIMECTL_MANUAL_TIME` (RFC3339, only if mode is MANUAL)
+- `TIMECTL_SOURCE_NODE_ID` (node ID selected as source for manual sync)
+- `TIMECTL_SOURCE_NODE_RAFT_ADDR` (raft address of selected source node)
 
 Specify the command via:
 - `--ntp-apply-cmd '/path/to/script --flag'` (CLI flag)
@@ -288,6 +290,7 @@ service TimeCtl {
 
 - When a new cluster time mode decision is applied, timectl runs the command specified by `--ntp-apply-cmd` (or `TIMECTL_NTP_APPLY_CMD`).
 - The command receives the current mode, order ID, and (if set) manual time as environment variables.
+- For MANUAL mode, it also receives source-node metadata (`TIMECTL_SOURCE_NODE_ID`, `TIMECTL_SOURCE_NODE_RAFT_ADDR`) so each node can sync from the same chosen node before applying the manual-time delta.
 - No NTP/ntpd service is started or stopped by timectl itself.
 - If no command is set, nothing is run.
 

@@ -1,6 +1,4 @@
-
 package raft
-
 
 import (
 	"encoding/json"
@@ -24,27 +22,30 @@ func (f *FSM) GetLastOrderID() uint64 {
 
 // FSM implements raft.FSM interface for managing time mode state
 type FSM struct {
-	mu                sync.RWMutex
-	currentMode       config.TimeMode
-	currentOrderID    uint64
-	lastUpdated       time.Time
-	operatorID        string
-	manualTime        *time.Time
-	lastSyncTime      time.Time
-	serverStates      map[string]config.ServerState // state of all servers
-	consensusLog      []config.ConsensusLog
-	lastLogIndex      uint64
+	mu                 sync.RWMutex
+	currentMode        config.TimeMode
+	currentOrderID     uint64
+	lastUpdated        time.Time
+	operatorID         string
+	manualTime         *time.Time
+	orderCreatedAt     time.Time
+	sourceNodeID       string
+	sourceNodeRaftAddr string
+	lastSyncTime       time.Time
+	serverStates       map[string]config.ServerState // state of all servers
+	consensusLog       []config.ConsensusLog
+	lastLogIndex       uint64
 }
 
 // NewFSM creates a new FSM
 func NewFSM() *FSM {
 	return &FSM{
-		currentMode:  config.ModeAuto, // Default to AUTO mode
+		currentMode:    config.ModeAuto, // Default to AUTO mode
 		currentOrderID: 0,
-		lastUpdated:  time.Now(),
-		serverStates: make(map[string]config.ServerState),
-		consensusLog: make([]config.ConsensusLog, 0),
-		lastLogIndex: 0,
+		lastUpdated:    time.Now(),
+		serverStates:   make(map[string]config.ServerState),
+		consensusLog:   make([]config.ConsensusLog, 0),
+		lastLogIndex:   0,
 	}
 }
 
@@ -81,7 +82,7 @@ func (f *FSM) applySetTimeMode(cmd *ApplyCommand, log *raftlib.Log) interface{} 
 
 	// Perform consensus decision
 	decidedMode := f.makeConsensusDecision(state)
-	
+
 	f.currentMode = decidedMode
 	if state.OrderID > 0 {
 		f.currentOrderID = state.OrderID
@@ -90,17 +91,22 @@ func (f *FSM) applySetTimeMode(cmd *ApplyCommand, log *raftlib.Log) interface{} 
 	}
 	f.lastUpdated = time.Now()
 	f.operatorID = state.OperatorID
+	f.orderCreatedAt = state.OrderCreatedAt
+	f.sourceNodeID = state.SourceNodeID
+	f.sourceNodeRaftAddr = state.SourceNodeRaftAddr
 	if state.ManualTime != nil {
 		f.manualTime = state.ManualTime
+	} else {
+		f.manualTime = nil
 	}
 
 	// Log the consensus decision
 	consensusEntry := config.ConsensusLog{
-		Index:      log.Index,
-		Term:       log.Term,
-		Type:       config.LogTypeTimeModeChange,
-		Timestamp:  time.Now(),
-		NewMode:    decidedMode,
+		Index:     log.Index,
+		Term:      log.Term,
+		Type:      config.LogTypeTimeModeChange,
+		Timestamp: time.Now(),
+		NewMode:   decidedMode,
 	}
 	f.consensusLog = append(f.consensusLog, consensusEntry)
 
@@ -141,25 +147,25 @@ func (f *FSM) applyHealthCheck(cmd *ApplyCommand, log *raftlib.Log) interface{} 
 
 // makeConsensusDecision chooses the most recent order/epoch from all nodes and uses its mode
 func (f *FSM) makeConsensusDecision(newState *config.TimeModeState) config.TimeMode {
-   // Collect all reported orders (including newState)
-   type orderInfo struct {
-	   Mode    config.TimeMode
-	   OrderID uint64
-   }
-   orders := []orderInfo{
-	   {Mode: newState.Mode, OrderID: newState.OrderID},
-   }
-   for _, state := range f.serverStates {
-	   orders = append(orders, orderInfo{Mode: state.LastMode, OrderID: state.LastOrderID})
-   }
-   // Find the order with the highest OrderID
-   var latest orderInfo
-   for i, o := range orders {
-	   if i == 0 || o.OrderID > latest.OrderID {
-		   latest = o
-	   }
-   }
-   return latest.Mode
+	// Collect all reported orders (including newState)
+	type orderInfo struct {
+		Mode    config.TimeMode
+		OrderID uint64
+	}
+	orders := []orderInfo{
+		{Mode: newState.Mode, OrderID: newState.OrderID},
+	}
+	for _, state := range f.serverStates {
+		orders = append(orders, orderInfo{Mode: state.LastMode, OrderID: state.LastOrderID})
+	}
+	// Find the order with the highest OrderID
+	var latest orderInfo
+	for i, o := range orders {
+		if i == 0 || o.OrderID > latest.OrderID {
+			latest = o
+		}
+	}
+	return latest.Mode
 }
 
 // Snapshot creates a snapshot of current FSM state
@@ -168,13 +174,16 @@ func (f *FSM) Snapshot() (raftlib.FSMSnapshot, error) {
 	defer f.mu.RUnlock()
 
 	return &FSMSnapshot{
-		currentMode:  f.currentMode,
-		lastUpdated:  f.lastUpdated,
-		operatorID:   f.operatorID,
-		manualTime:   f.manualTime,
-		lastSyncTime: f.lastSyncTime,
-		serverStates: f.serverStates,
-		lastLogIndex: f.lastLogIndex,
+		currentMode:        f.currentMode,
+		lastUpdated:        f.lastUpdated,
+		operatorID:         f.operatorID,
+		manualTime:         f.manualTime,
+		orderCreatedAt:     f.orderCreatedAt,
+		sourceNodeID:       f.sourceNodeID,
+		sourceNodeRaftAddr: f.sourceNodeRaftAddr,
+		lastSyncTime:       f.lastSyncTime,
+		serverStates:       f.serverStates,
+		lastLogIndex:       f.lastLogIndex,
 	}, nil
 }
 
@@ -195,6 +204,9 @@ func (f *FSM) Restore(snapshot io.ReadCloser) error {
 	f.lastUpdated = fsnap.lastUpdated
 	f.operatorID = fsnap.operatorID
 	f.manualTime = fsnap.manualTime
+	f.orderCreatedAt = fsnap.orderCreatedAt
+	f.sourceNodeID = fsnap.sourceNodeID
+	f.sourceNodeRaftAddr = fsnap.sourceNodeRaftAddr
 	f.lastSyncTime = fsnap.lastSyncTime
 	f.serverStates = fsnap.serverStates
 	f.lastLogIndex = fsnap.lastLogIndex
@@ -227,30 +239,36 @@ func (f *FSM) GetTimeModeState() config.TimeModeState {
 	defer f.mu.RUnlock()
 
 	return config.TimeModeState{
-		Mode:         f.currentMode,
-		OrderID:      f.currentOrderID,
-		LastUpdated:  f.lastUpdated,
-		OperatorID:   f.operatorID,
-		ManualTime:   f.manualTime,
-		LastSyncTime: f.lastSyncTime,
+		Mode:               f.currentMode,
+		OrderID:            f.currentOrderID,
+		LastUpdated:        f.lastUpdated,
+		OperatorID:         f.operatorID,
+		ManualTime:         f.manualTime,
+		OrderCreatedAt:     f.orderCreatedAt,
+		SourceNodeID:       f.sourceNodeID,
+		SourceNodeRaftAddr: f.sourceNodeRaftAddr,
+		LastSyncTime:       f.lastSyncTime,
 	}
 }
 
 // FSMSnapshot implements raft.FSMSnapshot
 type FSMSnapshot struct {
-	currentMode  config.TimeMode
-	lastUpdated  time.Time
-	operatorID   string
-	manualTime   *time.Time
-	lastSyncTime time.Time
-	serverStates map[string]config.ServerState
-	lastLogIndex uint64
+	currentMode        config.TimeMode
+	lastUpdated        time.Time
+	operatorID         string
+	manualTime         *time.Time
+	orderCreatedAt     time.Time
+	sourceNodeID       string
+	sourceNodeRaftAddr string
+	lastSyncTime       time.Time
+	serverStates       map[string]config.ServerState
+	lastLogIndex       uint64
 }
 
 // Persist persists the snapshot
 func (fs *FSMSnapshot) Persist(sink raftlib.SnapshotSink) error {
 	defer sink.Close()
-	
+
 	b, err := json.Marshal(fs)
 	if err != nil {
 		sink.Cancel()

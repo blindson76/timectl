@@ -16,9 +16,9 @@ type commandSpec struct {
 // Manager manages NTP service
 
 type Manager struct {
-    mu           sync.RWMutex
-    ntpServers   []string
-    applyCommand string
+	mu           sync.RWMutex
+	ntpServers   []string
+	applyCommand string
 }
 
 // NewManager creates a new NTP manager
@@ -31,7 +31,7 @@ func NewManager(ntpServers []string, applyCommand string) *Manager {
 
 // Apply runs the user-specified NTP apply command (if set)
 // This should be called when a new cluster decision is applied.
-func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time) error {
+func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time, sourceNodeID, sourceNodeRaftAddr string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -43,6 +43,12 @@ func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time) erro
 	env := []string{
 		fmt.Sprintf("TIMECTL_MODE=%s", mode),
 		fmt.Sprintf("TIMECTL_ORDER_ID=%d", orderID),
+	}
+	if sourceNodeID != "" {
+		env = append(env, fmt.Sprintf("TIMECTL_SOURCE_NODE_ID=%s", sourceNodeID))
+	}
+	if sourceNodeRaftAddr != "" {
+		env = append(env, fmt.Sprintf("TIMECTL_SOURCE_NODE_RAFT_ADDR=%s", sourceNodeRaftAddr))
 	}
 	if manualTime != nil {
 		env = append(env, fmt.Sprintf("TIMECTL_MANUAL_TIME=%s", manualTime.Format(time.RFC3339)))
@@ -62,7 +68,6 @@ func (m *Manager) Apply(mode string, orderID uint64, manualTime *time.Time) erro
 	}
 	return nil
 }
-
 
 // Stop is now a no-op (legacy)
 func (m *Manager) Stop() error {

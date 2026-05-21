@@ -3,9 +3,9 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
-	"net/http"
 	"sync"
 	"time"
 
@@ -16,18 +16,18 @@ import (
 
 // Server implements the timectl service
 type Server struct {
-	cfg          *config.ServerConfig
-	raftCluster  *raft.Cluster
-	ntpManager   *ntp.Manager
-	httpServer   *http.Server
-	mu           sync.RWMutex
-	closed       bool
-	heartbeatTTL time.Duration
+	cfg                       *config.ServerConfig
+	raftCluster               *raft.Cluster
+	ntpManager                *ntp.Manager
+	httpServer                *http.Server
+	mu                        sync.RWMutex
+	closed                    bool
+	heartbeatTTL              time.Duration
 	lastExternalTimeAvailable bool
-	hasAppliedDecision bool
-	lastAppliedOrderID uint64
-	lastAppliedMode config.TimeMode
-	lastAppliedManualTime *time.Time
+	hasAppliedDecision        bool
+	lastAppliedOrderID        uint64
+	lastAppliedMode           config.TimeMode
+	lastAppliedManualTime     *time.Time
 }
 
 type persistedStatus struct {
@@ -237,7 +237,7 @@ func (s *Server) applyTimeMode(mode config.TimeMode) error {
 			manualTime = &t
 		}
 	}
-	if err := s.ntpManager.Apply(mode.String(), state.OrderID, manualTime); err != nil {
+	if err := s.ntpManager.Apply(mode.String(), state.OrderID, manualTime, state.SourceNodeID, state.SourceNodeRaftAddr); err != nil {
 		return fmt.Errorf("failed to run NTP apply command: %w", err)
 	}
 	return nil
@@ -251,18 +251,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	stats := s.raftCluster.GetStats()
 
 	response := map[string]interface{}{
-		"node_id":         s.cfg.NodeID,
-		"state":           s.raftCluster.GetState(),
-		"leader":          s.raftCluster.GetLeader(),
-		"is_leader":       s.raftCluster.IsLeader(),
-		"current_mode":    state.Mode.String(),
-		"order_id":        state.OrderID,
-		"last_updated":    state.LastUpdated,
-		"manual_time":     state.ManualTime,
+		"node_id":                 s.cfg.NodeID,
+		"state":                   s.raftCluster.GetState(),
+		"leader":                  s.raftCluster.GetLeader(),
+		"is_leader":               s.raftCluster.IsLeader(),
+		"current_mode":            state.Mode.String(),
+		"order_id":                state.OrderID,
+		"last_updated":            state.LastUpdated,
+		"manual_time":             state.ManualTime,
 		"external_time_available": s.lastExternalTimeAvailable,
-		"cluster_size":    s.raftCluster.GetClusterSize(),
-		"has_quorum":      s.raftCluster.IsMinimumQuorum(),
-		"raft_stats":      stats,
+		"cluster_size":            s.raftCluster.GetClusterSize(),
+		"has_quorum":              s.raftCluster.IsMinimumQuorum(),
+		"raft_stats":              stats,
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -275,10 +275,13 @@ func (s *Server) handleTimeMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		state := s.raftCluster.GetTimeModeState()
 		response := map[string]interface{}{
-			"mode":         state.Mode.String(),
-			"order_id":     state.OrderID,
-			"last_updated": state.LastUpdated,
-			"operator_id":  state.OperatorID,
+			"mode":                  state.Mode.String(),
+			"order_id":              state.OrderID,
+			"last_updated":          state.LastUpdated,
+			"operator_id":           state.OperatorID,
+			"order_created_at":      state.OrderCreatedAt,
+			"source_node_id":        state.SourceNodeID,
+			"source_node_raft_addr": state.SourceNodeRaftAddr,
 		}
 		if state.ManualTime != nil {
 			response["manual_time"] = state.ManualTime
@@ -344,7 +347,7 @@ func (s *Server) handleTimeMode(w http.ResponseWriter, r *http.Request) {
 
 		operatorID, _ := req["operator_id"].(string)
 
-		if err := s.raftCluster.SetTimeMode(mode, operatorID, manualTime); err != nil {
+		if err := s.raftCluster.SetTimeMode(mode, operatorID, manualTime, s.cfg.NodeID, s.cfg.RaftAddr); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -365,12 +368,12 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	response := map[string]interface{}{
-		"node_id":     s.cfg.NodeID,
-		"state":       s.raftCluster.GetState(),
-		"leader":      s.raftCluster.GetLeader(),
+		"node_id":      s.cfg.NodeID,
+		"state":        s.raftCluster.GetState(),
+		"leader":       s.raftCluster.GetLeader(),
 		"cluster_size": s.raftCluster.GetClusterSize(),
-		"has_quorum":  s.raftCluster.IsMinimumQuorum(),
-		"raft_stats":  s.raftCluster.GetStats(),
+		"has_quorum":   s.raftCluster.IsMinimumQuorum(),
+		"raft_stats":   s.raftCluster.GetStats(),
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -385,14 +388,14 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 
 	for _, state := range serverStates {
 		servers = append(servers, map[string]interface{}{
-			"node_id":         state.NodeID,
-			"last_mode":       state.LastMode.String(),
-			"last_order_id":   state.LastOrderID,
-			"manual_time":     state.ManualTime,
+			"node_id":                 state.NodeID,
+			"last_mode":               state.LastMode.String(),
+			"last_order_id":           state.LastOrderID,
+			"manual_time":             state.ManualTime,
 			"external_time_available": state.ExternalTimeAvailable,
-			"last_updated":    state.LastUpdated,
-			"is_alive":        state.IsAlive,
-			"last_heartbeat":  state.LastHeartbeat,
+			"last_updated":            state.LastUpdated,
+			"is_alive":                state.IsAlive,
+			"last_heartbeat":          state.LastHeartbeat,
 		})
 	}
 
@@ -427,11 +430,23 @@ func (s *Server) startupClusterDecision() error {
 	}
 
 	operatorID := "startup-sync"
-	if err := s.raftCluster.SetTimeModeWithOrder(chosen.LastMode, operatorID, chosen.ManualTime, chosen.LastOrderID); err != nil {
+	if err := s.raftCluster.SetTimeModeWithOrder(chosen.LastMode, operatorID, chosen.ManualTime, chosen.LastOrderID, chosen.NodeID, s.raftAddrForNodeID(chosen.NodeID)); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (s *Server) raftAddrForNodeID(nodeID string) string {
+	if nodeID == s.cfg.NodeID {
+		return s.cfg.RaftAddr
+	}
+	for _, m := range s.cfg.ClusterMembers {
+		if m.NodeID == nodeID {
+			return m.RaftAddr
+		}
+	}
+	return ""
 }
 
 func (s *Server) reportStartupStatus() error {
@@ -521,7 +536,7 @@ func (s *Server) detectExternalTimeAvailable() bool {
 // handleLogs handles GET /api/logs
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	response := map[string]interface{}{
 		"message": "log endpoint not yet implemented",
 	}
