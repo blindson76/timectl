@@ -36,6 +36,7 @@ type persistedStatus struct {
 	OrderID               uint64     `json:"order_id"`
 	LastUpdated           time.Time  `json:"last_updated"`
 	ExternalTimeAvailable bool       `json:"external_time_available"`
+	Applied               bool       `json:"applied"`
 }
 
 // NewServer creates a new timectl server
@@ -182,6 +183,16 @@ func (s *Server) reconciliationLoop() {
 	}
 }
 
+func sameDecisionState(a, b config.TimeModeState) bool {
+	if a.Mode != b.Mode {
+		return false
+	}
+	if a.OrderID != b.OrderID {
+		return false
+	}
+	return sameTimePtr(a.ManualTime, b.ManualTime)
+}
+
 func (s *Server) shouldApplyDecision(state config.TimeModeState) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -218,6 +229,12 @@ func (s *Server) markDecisionApplied(state config.TimeModeState) {
 	} else {
 		s.lastAppliedManualTime = nil
 	}
+}
+
+func (s *Server) isDecisionApplied() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hasAppliedDecision
 }
 
 func sameTimePtr(a, b *time.Time) bool {
@@ -265,6 +282,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"order_id":                state.OrderID,
 		"last_updated":            state.LastUpdated,
 		"manual_time":             state.ManualTime,
+		"applied":                 s.isDecisionApplied(),
 		"external_time_available": s.lastExternalTimeAvailable,
 		"cluster_size":            s.raftCluster.GetClusterSize(),
 		"has_quorum":              s.raftCluster.IsMinimumQuorum(),
@@ -288,6 +306,7 @@ func (s *Server) handleTimeMode(w http.ResponseWriter, r *http.Request) {
 			"order_created_at":      state.OrderCreatedAt,
 			"source_node_id":        state.SourceNodeID,
 			"source_node_raft_addr": state.SourceNodeRaftAddr,
+			"applied":               s.isDecisionApplied(),
 		}
 		if state.ManualTime != nil {
 			response["manual_time"] = state.ManualTime
@@ -436,6 +455,15 @@ func (s *Server) startupClusterDecision() error {
 		return nil
 	}
 
+	current := s.raftCluster.GetTimeModeState()
+	if sameDecisionState(current, config.TimeModeState{
+		Mode:       chosen.LastMode,
+		OrderID:    chosen.LastOrderID,
+		ManualTime: chosen.ManualTime,
+	}) {
+		return nil
+	}
+
 	operatorID := "startup-sync"
 	if err := s.raftCluster.SetTimeModeWithOrder(chosen.LastMode, operatorID, chosen.ManualTime, chosen.LastOrderID, chosen.NodeID, s.raftAddrForNodeID(chosen.NodeID)); err != nil {
 		return err
@@ -478,6 +506,18 @@ func (s *Server) reportStartupStatus() error {
 		ExternalTimeAvailable: persisted.ExternalTimeAvailable,
 	}
 
+	s.mu.Lock()
+	s.hasAppliedDecision = persisted.Applied
+	s.lastAppliedOrderID = persisted.OrderID
+	s.lastAppliedMode = mode
+	if persisted.ManualTime != nil {
+		manualTime := *persisted.ManualTime
+		s.lastAppliedManualTime = &manualTime
+	} else {
+		s.lastAppliedManualTime = nil
+	}
+	s.mu.Unlock()
+
 	return s.raftCluster.SyncServerStates([]config.ServerState{state})
 }
 
@@ -516,6 +556,7 @@ func (s *Server) persistCurrentStatus() error {
 		OrderID:               state.OrderID,
 		LastUpdated:           time.Now(),
 		ExternalTimeAvailable: s.lastExternalTimeAvailable,
+		Applied:               s.isDecisionApplied(),
 	}
 
 	b, err := json.MarshalIndent(ps, "", "  ")
